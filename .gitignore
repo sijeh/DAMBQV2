@@ -1,0 +1,6 @@
+datasets/
+checkpoints/
+results/
+**/.DS_Store
+.vscode/
+**/temp.py
