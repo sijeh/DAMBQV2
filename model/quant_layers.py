@@ -70,10 +70,10 @@ def quantize_act(data,clip_scale,bitwidth):
 
 
 class QuantConv2d(nn.Conv2d):
-    def __init__(self, in_channels: int, out_channels: int, kernel_size: int,bit_wgt:int=4,bit_act:int=4,layerwise:bool=False,**kwargs) -> None:
+    def __init__(self, in_channels, out_channels, kernel_size,bit_wgt=4,bit_act=4,layerwise=False,**kwargs) -> None:
         super().__init__(in_channels, out_channels, kernel_size, **kwargs)
         
-        self.k_size = kernel_size
+        self.k_size = kernel_size[0] if isinstance(kernel_size,(tuple,list)) else kernel_size
         if layerwise:
             self.groups_wgt = 1
             self.groups_act = 1
@@ -86,11 +86,11 @@ class QuantConv2d(nn.Conv2d):
         self.register_buffer('alpha_wgt',torch.full((self.groups_wgt,),1.0))
         self.register_parameter('alpha_act',nn.Parameter(torch.tensor([3.0])))        
         self.register_buffer('clip_wgt',torch.tensor(CLIP_W))
-        self.register_buffer('bit_wgt',torch.full((self.groups_wgt,),4,dtype=torch.int))
-        self.register_buffer('bit_act',torch.full((self.groups_act,),4,dtype=torch.int))
-        points_wgt = torch.tensor(QUANT_BASES).index_select(0,self.bit_wgt)
+        self.register_buffer('bit_wgt',torch.full((self.groups_wgt,),bit_wgt,dtype=torch.long))
+        self.register_buffer('bit_act',torch.full((self.groups_act,),bit_act,dtype=torch.long))
+        points_wgt = torch.tensor(QUANT_BASES,dtype=torch.float32).index_select(0,self.bit_wgt)
         self.register_buffer('points_wgt',points_wgt)
-        
+        self.init = False
     
     def forward(self,x):
         if self.training:
@@ -100,10 +100,14 @@ class QuantConv2d(nn.Conv2d):
                 else:
                     scale_wgt = self.weight.abs().mean(dim=(1,2,3))
                 alpha_wgt_cur = self.clip_wgt[self.bit_wgt] * scale_wgt
-                self.alpha_wgt.data = alpha_wgt_cur * (1 - self.ema_decay) + self.ema_decay * self.alpha_W.data
+                if not self.init:
+                    self.alpha_wgt.data = alpha_wgt_cur
+                    self.init = True
+                else:
+                    self.alpha_wgt.data = alpha_wgt_cur * (1 - self.ema_decay) + self.ema_decay * self.alpha_wgt.data
                 
-        self.x_q = quantize_act(x,self.alpha_act.view(1,self.groups_act,1,1),self.bit_act)
-        self.w_q = quantize_wgt(self.weight,self.alpha_wgt.view(self.groups_wgt,1,1,1),self.points_wgt,self.layerwise)
+        self.x_q = quantize_act(x,self.alpha_act.view(1,-1,1,1),self.bit_act.view(1,-1,1,1))
+        self.w_q = quantize_wgt(self.weight,self.alpha_wgt.view(-1,1,1,1),self.points_wgt,self.layerwise)
         
         if self.training:
             self.x_q.retain_grad()
@@ -128,28 +132,31 @@ class QuantConv2d(nn.Conv2d):
             self.x_err = self.x_res.mul(self.x_q.grad).sum(dim=(0,2,3),keepdim=False).div(x_num).detach()
 
         return self.w_err,self.x_err
-                   
+    
+    def update_quant_points(self,device):
+        self.points_wgt.data = torch.tensor(QUANT_BASES,dtype=torch.float32).index_select(0,self.bit_wgt).to(device)         
         
 
 class QuantLinear(nn.Linear):
-    def __init__(self, in_features: int, out_features: int, groups_wgt=None,groups_act=None,bit_wgt:int=4,bit_act:int=4,layerwise:bool=False,**kwargs) -> None:
+    def __init__(self, in_features, out_features, groups_wgt=None,groups_act=None,bit_wgt=4,bit_act=4,layerwise=False,**kwargs) -> None:
         super().__init__(in_features, out_features, **kwargs)
 
         if layerwise:
             groups_wgt = 1
             groups_act = 1
         self.layerwise = layerwise
-        self.groups_wgt = groups_wgt
-        self.groups_act = groups_act
+        self.groups_wgt = groups_wgt if groups_wgt else out_features // 16
+        self.groups_act = groups_act if groups_act else in_features // 4
         self.ema_decay = 0.99
 
         self.register_buffer('alpha_wgt',torch.full((self.groups_wgt,),1.0))
-        self.register_parameter('alpha_act',nn.Paramer(torch.tensor([3.0])))
+        self.register_parameter('alpha_act',nn.Parameter(torch.tensor([3.0])))
         self.register_buffer('clip_wgt',torch.tensor(CLIP_W))
-        self.register_buffer('bit_wgt',torch.full((self.groups_wgt,),4,dtype=torch.int))
-        self.register_buffer('bit_act',torch.full((self.groups_act,),4,dtype=torch.int))
-        points_wgt = torch.tensor(QUANT_BASES).index_select(0,self.bit_wgt)
+        self.register_buffer('bit_wgt',torch.full((self.groups_wgt,),4,dtype=torch.long))
+        self.register_buffer('bit_act',torch.full((self.groups_act,),4,dtype=torch.long))
+        points_wgt = torch.tensor(QUANT_BASES,dtype=torch.float32).index_select(0,self.bit_wgt)
         self.register_buffer('points_wgt',points_wgt)
+        self.init = False
     
     def forward(self,x):
         w_r = self.weight.view(self.groups_wgt,-1,self.in_features)
@@ -161,7 +168,11 @@ class QuantLinear(nn.Linear):
                 else:
                     scale_wgt = w_r.abs().mean(dim=(1,2))
                 alpha_wgt_cur = self.clip_wgt[self.bit_wgt] * scale_wgt
-                self.alpha_wgt.data = alpha_wgt_cur * (1 - self.ema_decay) + self.ema_decay * self.alpha_W.data
+                if not self.init:
+                    self.alpha_wgt.data = alpha_wgt_cur
+                    self.init = True
+                else:
+                    self.alpha_wgt.data = alpha_wgt_cur * (1 - self.ema_decay) + self.ema_decay * self.alpha_wgt.data
         
         self.x_q = quantize_act(x_r,self.alpha_act,self.bit_act.view(1,self.in_groups,1)).view(x.shape[0],self.in_features) 
         self.w_q = quantize_wgt(w_r,self.alpha_wgt.view(self.groups_wgt,1,1),self.points_wgt,self.layerwise).view(self.out_features,self.in_features)
@@ -185,9 +196,10 @@ class QuantLinear(nn.Linear):
             self.w_err = self.w_res.mul(self.w_q.grad).view(self.groups_wgt,-1,self.in_features).sum(dim=(1,2),keepdim=False).div(w_num).detach()
             self.x_err = self.x_res.mul(self.x_q.grad).view(self.x_q.shape[0],self.groups_act,-1).sum(dim=(0,2),keepdim=False).div(x_num).detach()
 
-
         return self.w_err,self.x_err
-        
+    
+    def update_quant_points(self,device):
+        self.points_wgt.data = torch.tensor(QUANT_BASES,dtype=torch.float32).index_select(0,self.bit_wgt).to(device)
         
 class FirstConv2d(nn.Conv2d):
 
@@ -220,5 +232,12 @@ class LastLinear(nn.Linear):
             
 
 if __name__ == '__main__':
-    quant_points = build_quant_base(ALPHA_W)
-    print(quant_points)
+    
+    weight = torch.randn(16,16,3,3)
+    alpha = torch.full((16,),1.0)
+    bit = torch.full((16,),4,dtype=torch.long)
+    points = torch.tensor(QUANT_BASES,dtype=torch.float32).index_select(0,bit)
+    quantized = quantize_wgt(weight,alpha.view(-1,1,1,1),points,False)
+    print('ok')
+    
+    

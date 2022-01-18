@@ -18,6 +18,8 @@ import torchvision.transforms as transforms
 import torchvision.datasets as datasets
 import torchvision.models as models
 
+from model import QuantTune
+
 model_names = sorted(name for name in models.__dict__
                      if name.islower() and not name.startswith("__")
                      and callable(models.__dict__[name]))
@@ -100,6 +102,26 @@ parser.add_argument('--seed',
                     default=None,
                     type=int,
                     help='seed for initializing training. ')
+parser.add_argument('--quantize',
+                    default=False,
+                    type=bool,
+                    help='quantization-aware training')
+parser.add_argument('--layerwise',
+                    default=False,
+                    type=bool,
+                    help='layer wise or channel wise')
+parser.add_argument('--wgt-target',
+                    default=2.0,
+                    type=float,
+                    help='target average bit width for wight')
+parser.add_argument('--act-target',
+                    default=2.0,
+                    type=float,
+                    help='target average bit width for activation')
+parser.add_argument('--duration',
+                    default=[10,70],
+                    type=list,
+                    help='target average bit width for activation')
 
 
 def reduce_mean(tensor, nprocs):
@@ -197,6 +219,12 @@ def main_worker(local_rank, nprocs, args):
     if args.evaluate:
         validate(val_loader, model, criterion, local_rank, args)
         return
+    
+    # quantize code
+    if args.quantize:
+        tuner = QuantTune(model,args.wgt_target,args.act_target,layerwise=args.layerwise,duration=args.duration,device=torch.device(local_rank))
+    else:
+        tuner = None
 
     for epoch in range(args.start_epoch, args.epochs):
         train_sampler.set_epoch(epoch)
@@ -204,12 +232,22 @@ def main_worker(local_rank, nprocs, args):
 
         adjust_learning_rate(optimizer, epoch, args)
 
+        tuner.quantize_cur = args.quantize and epoch >= args.duration[0] and epoch <= args.duration[1]
         # train for one epoch
         train(train_loader, model, criterion, optimizer, epoch, local_rank,
-              args)
-
+              args,tuner)
+        # quantize code
+        if tuner.quantize_cur:
+            tuner.broadcast(0)
+            tuner.sort_and_tune()
+        
+        if args.quantize:
+            w_avg_bit,x_avg_bit = tuner.compute_avg_bit()
+            #log
+            
+            
         # evaluate on validation set
-        acc1 = validate(val_loader, model, criterion, local_rank, args)
+        acc1,acc5 = validate(val_loader, model, criterion, local_rank, args)
 
         # remember best acc@1 and save checkpoint
         is_best = acc1 > best_acc1
@@ -225,7 +263,7 @@ def main_worker(local_rank, nprocs, args):
                 }, is_best)
 
 
-def train(train_loader, model, criterion, optimizer, epoch, local_rank, args):
+def train(train_loader, model, criterion, optimizer, epoch, local_rank, args,tuner=None):
     batch_time = AverageMeter('Time', ':6.3f')
     data_time = AverageMeter('Data', ':6.3f')
     losses = AverageMeter('Loss', ':.4e')
@@ -267,6 +305,10 @@ def train(train_loader, model, criterion, optimizer, epoch, local_rank, args):
         optimizer.zero_grad()
         loss.backward()
         optimizer.step()
+        
+        # quantize code
+        if tuner.quantize_cur:
+            tuner.compute_quant_residual()
 
         # measure elapsed time
         batch_time.update(time.time() - end)
@@ -321,7 +363,7 @@ def validate(val_loader, model, criterion, local_rank, args):
         print(' * Acc@1 {top1.avg:.3f} Acc@5 {top5.avg:.3f}'.format(top1=top1,
                                                                     top5=top5))
 
-    return top1.avg
+    return top1.avg,top5.avg
 
 
 def save_checkpoint(state, is_best, filename='checkpoint.pth.tar'):
