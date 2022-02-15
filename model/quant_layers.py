@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 import numpy as np
 import torch.nn.functional as F
+import math
 
 ALPHA_W =  [[0.0, 0.0, 0.0, 0.0],
             [1.0, 0.0, 0.0, 0.0],
@@ -33,6 +34,7 @@ def build_quant_base(alpha):
     return quant_bases
 
 QUANT_BASES = build_quant_base(ALPHA_W)
+EPS = 1e-6
 
 def round_pass(x):
     y = x.round()
@@ -40,7 +42,7 @@ def round_pass(x):
     return y.detach() - y_grad.detach() + y_grad
 
 def quantize_wgt(data,clip_scale,proj_set,layerwise):
-    x = data / clip_scale
+    x = data / (clip_scale + EPS)
     x = torch.clamp(x,-1,1)
     xshape = x.shape
     pshape = proj_set.shape
@@ -62,10 +64,10 @@ def quantize_wgt(data,clip_scale,proj_set,layerwise):
 
 def quantize_act(data,clip_scale,bitwidth):
     quant_scale = 2**bitwidth - 1
-    x = data / clip_scale
+    x = data / (clip_scale + EPS)
     x = torch.clamp(x,0,1) * quant_scale
     y = round_pass(x)
-    y = y * clip_scale / quant_scale 
+    y = y * clip_scale / (quant_scale + EPS)
     return y
 
 
@@ -94,18 +96,18 @@ class QuantConv2d(nn.Conv2d):
     
     def forward(self,x):
         if self.training:
-            with torch.no_grad():
-                if self.layerwise:
-                    scale_wgt = self.weight.abs().mean()
-                else:
-                    scale_wgt = self.weight.abs().mean(dim=(1,2,3))
-                alpha_wgt_cur = self.clip_wgt[self.bit_wgt] * scale_wgt
-                if not self.init:
-                    self.alpha_wgt.data = alpha_wgt_cur
-                    self.init = True
-                else:
-                    self.alpha_wgt.data = alpha_wgt_cur * (1 - self.ema_decay) + self.ema_decay * self.alpha_wgt.data
-                
+                with torch.no_grad():
+                    if self.layerwise:
+                        scale_wgt = self.weight.abs().mean()
+                    else:
+                        scale_wgt = self.weight.abs().mean(dim=(1,2,3))
+                    alpha_wgt_cur = self.clip_wgt[self.bit_wgt] * scale_wgt
+                    if not self.init:
+                        self.alpha_wgt.data = alpha_wgt_cur
+                        self.init = True
+                    else:
+                        self.alpha_wgt.data = alpha_wgt_cur * (1 - self.ema_decay) + self.ema_decay * self.alpha_wgt.data
+        
         self.x_q = quantize_act(x,self.alpha_act.view(1,-1,1,1),self.bit_act.view(1,-1,1,1))
         self.w_q = quantize_wgt(self.weight,self.alpha_wgt.view(-1,1,1,1),self.points_wgt,self.layerwise)
         
@@ -122,19 +124,19 @@ class QuantConv2d(nn.Conv2d):
 
         w_num = float(self.w_res.nelement()/self.groups_wgt)
         x_num = float(self.x_res.nelement()/self.groups_act)
-        
-        if self.layerwise:
-            self.w_err = self.w_res.mul(self.w_q.grad).sum().div(w_num).view(1).detach()
-            self.x_err = self.x_res.mul(self.x_q.grad).sum().div(x_num).view(1).detach()
-           
-        else:
-            self.w_err = self.w_res.mul(self.w_q.grad).sum(dim=(1,2,3),keepdim=False).div(w_num).detach()
-            self.x_err = self.x_res.mul(self.x_q.grad).sum(dim=(0,2,3),keepdim=False).div(x_num).detach()
+        with torch.no_grad():
+            if self.layerwise:
+                self.w_err = self.w_res.mul(self.w_q.grad).abs().sum().div(w_num).view(1).detach()
+                self.x_err = self.x_res.mul(self.x_q.grad).abs().sum().div(x_num).view(1).detach()
+            
+            else:
+                self.w_err = self.w_res.mul(self.w_q.grad).abs().sum(dim=(1,2,3),keepdim=False).div(w_num).detach()
+                self.x_err = self.x_res.mul(self.x_q.grad).abs().sum(dim=(0,2,3),keepdim=False).div(x_num).detach()
 
         return self.w_err,self.x_err
     
     def update_quant_points(self,device):
-        self.points_wgt.data = torch.tensor(QUANT_BASES,dtype=torch.float32).index_select(0,self.bit_wgt).to(device)         
+        self.points_wgt.data = torch.tensor(QUANT_BASES,dtype=torch.float32).to(device).index_select(0,self.bit_wgt)         
         
 
 class QuantLinear(nn.Linear):
@@ -152,8 +154,8 @@ class QuantLinear(nn.Linear):
         self.register_buffer('alpha_wgt',torch.full((self.groups_wgt,),1.0))
         self.register_parameter('alpha_act',nn.Parameter(torch.tensor([3.0])))
         self.register_buffer('clip_wgt',torch.tensor(CLIP_W))
-        self.register_buffer('bit_wgt',torch.full((self.groups_wgt,),4,dtype=torch.long))
-        self.register_buffer('bit_act',torch.full((self.groups_act,),4,dtype=torch.long))
+        self.register_buffer('bit_wgt',torch.full((self.groups_wgt,),bit_wgt,dtype=torch.long))
+        self.register_buffer('bit_act',torch.full((self.groups_act,),bit_act,dtype=torch.long))
         points_wgt = torch.tensor(QUANT_BASES,dtype=torch.float32).index_select(0,self.bit_wgt)
         self.register_buffer('points_wgt',points_wgt)
         self.init = False

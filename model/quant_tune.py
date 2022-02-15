@@ -3,13 +3,12 @@ import torch
 import torch.nn as nn
 from torch.nn.modules import module
 from torchvision.models.resnet import resnet18
-from quant_layers import QuantConv2d,QuantLinear,FirstConv2d,LastLinear
+from .quant_layers import QuantConv2d,QuantLinear,FirstConv2d,LastLinear
 import torch.distributed as dist
 
 def _convert2quant_module(m,bit_wgt,bit_act,names_8bit,fc_groups_wgt=None,fc_groups_act=None,prefix=None,layerwise=False,device=torch.device('cpu')):
     for name,child in m.named_children():
         module_name = '.'.join((prefix,name)) if prefix else name
-            
         if type(child) == nn.Conv2d:
             kwargs = {}
             kwargs['in_channels'] = child.in_channels
@@ -49,9 +48,9 @@ def _convert2quant_module(m,bit_wgt,bit_act,names_8bit,fc_groups_wgt=None,fc_gro
             new_linear.weight = child.weight
             setattr(m,name,new_linear)
         else:
-            _convert2quant_module(child,bit_wgt,bit_act,names_8bit,fc_groups_wgt,fc_groups_act,module_name,layerwise)
+            _convert2quant_module(child,bit_wgt,bit_act,names_8bit,fc_groups_wgt,fc_groups_act,module_name,layerwise,device)
 class QuantTune():
-    def __init__(self,model,wgt_target,act_target,tune_ratio_range=0.3,layerwise=False,duration=(0,10),device=torch.device('cpu')):
+    def __init__(self,model,wgt_target,act_target,tune_ratio_range=0.3,layerwise=False,duration=(0,10),logger=None,device=torch.device('cpu')):
         super().__init__()
         self.model = model
         self.wgt_target = wgt_target
@@ -60,6 +59,7 @@ class QuantTune():
         self.duration = duration
         self.device = device
         self.quantize_cur = False
+        self.logger = logger
         self.get_first_last_name()
         self.convert2quant_module(4,4,layerwise=layerwise,)
         self.init_err_buffer()
@@ -148,23 +148,27 @@ class QuantTune():
                 bit_act_aux = bit_act_aux[groups_act:]
                 module.update_quant_points(self.device)
 
-    def sort_and_tune(self,iter):
+    def sort_and_tune(self,epoch):
         
-        tune_ratio = (self.tune_ratio_range - 0.01) * iter / (self.duration[1]-self.duration[0]) + 0.01
+        tune_ratio = (self.tune_ratio_range - 0.01) * (epoch-self.duration[0]) / (self.duration[1]-self.duration[0]) + 0.01
         self.load_bit_config()
         self.compute_avg_bit()
         if self.x_bit_avg > self.act_target:
             x_k = int(len(self.x_err_total) * tune_ratio)
             assert len(self.bit_act) == len(self.x_err_total)
-            _,x_indices = torch.topk(self.x_err_total,x_k,largest=False)
+            x_v,x_indices = torch.topk(self.x_err_total,x_k,largest=False)
             self.bit_act[x_indices] -= 1
             self.bit_act = torch.clamp(self.bit_act,min=0)
+            print('Values of selected act: ',x_v)
+            print('indices of selected act: ',x_indices,'total: ',len(self.bit_act))
         if self.w_bit_avg > self.wgt_target:
             w_k = int(len(self.w_err_total) * tune_ratio)        
             assert len(self.bit_wgt) == len(self.w_err_total)
-            _,w_indices = torch.topk(self.w_err_total,w_k,largest=False)
+            w_v,w_indices = torch.topk(self.w_err_total,w_k,largest=False)
             self.bit_wgt[w_indices] -= 1
             self.bit_wgt = torch.clamp(self.bit_wgt,min=0)
+            print('Values of selected wgt: ',w_v)
+            print('indices of selected wgt: ',w_indices,'total: ',len(self.bit_wgt))
         
         self.save_bit_config()
         self.init_err_buffer()
@@ -173,6 +177,17 @@ class QuantTune():
         dist.broadcast(self.w_err_total,src_rank)
         dist.broadcast(self.x_err_total,src_rank)
 
+    def show_avg_bit(self):
+        for name,module in self.model.named_modules():
+            if isinstance(module,(QuantConv2d,QuantLinear)):
+                bit_wgt_avg = module.bit_wgt.float().mean().item()
+                bit_act_avg = module.bit_act.float().mean().item()
+                bit_wgt_min = module.bit_wgt.float().min().item()
+                bit_act_min = module.bit_act.float().min().item()
+                alpha_wgt_min = module.alpha_wgt.min().item()
+                alpha_act_min = module.alpha_act.min().item()
+                print(name,' bw_avg:%.2f ba_avg:%.2f  bw_min:%.1f ba_min:%.1f aw_min:%.3f aa_min:%.3f'%(bit_wgt_avg,bit_act_avg,bit_wgt_min,bit_act_min,alpha_wgt_min,alpha_act_min))
+                
     def get_first_last_name(self):
         names = []
         if isinstance(self.model,(torch.nn.parallel.DataParallel,torch.nn.parallel.DistributedDataParallel)):
@@ -186,24 +201,37 @@ class QuantTune():
         
    
 if __name__ == '__main__':
-    model = resnet18()
-    model = torch.nn.parallel.DataParallel(model)
-    x = torch.randn(1,3,224,224)
-    y = torch.randn(1000)
-    tuner = QuantTune(model,2.0,2.0)
-    print('ok')
+    # model = torch.nn.parallel.DataParallel(model)
+    # x = torch.randn(1,3,224,224)
+    # y = torch.randn(1000)
+    # tuner = QuantTune(model,2.0,2.0)
+    # print('ok')
 
-    model.train()
-    pred = model(x)
-    loss_fn = torch.nn.MSELoss()
-    loss = loss_fn(pred,y)
-    loss.backward()
-    tuner.compute_avg_bit()
-    print(tuner.x_bit_avg,tuner.w_bit_avg)
-    tuner.compute_quant_residual()
-    tuner.sort_and_tune(8)
-    tuner.compute_avg_bit()
-    print(tuner.x_bit_avg,tuner.w_bit_avg)
+    # model.train()
+    # pred = model(x)
+    # loss_fn = torch.nn.MSELoss()
+    # loss = loss_fn(pred,y)
+    # loss.backward()
+    # tuner.compute_avg_bit()
+    # print(tuner.x_bit_avg,tuner.w_bit_avg)
+    # tuner.compute_quant_residual()
+    # tuner.sort_and_tune(8)
+    # tuner.compute_avg_bit()
+    # print(tuner.x_bit_avg,tuner.w_bit_avg)
+    local_rank = 0
+    # dist.init_process_group(backend='nccl')
+    torch.cuda.set_device(local_rank)
+    model = resnet18()
+    model.cuda(local_rank)
+    # model = torch.nn.parallel.DistributedDataParallel(model,device_ids=[local_rank])
+    model = torch.nn.parallel.DataParallel(model)
+    print('000')
+    tuner = QuantTune(model,2.0,2.0,layerwise=False,duration=(0,1),device=torch.device(local_rank))
+    print('111')
+    x = torch.randn(1,3,224,224).cuda(local_rank)
+    y = torch.randn(1000).cuda(local_rank)
+    y_pred = model(x)
+    print('222')
     
     
     print('ok')
