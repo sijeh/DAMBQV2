@@ -7,3 +7,4 @@ results/
 **/__pycache__/
 taiji_start/
 data/
+pretrained/
