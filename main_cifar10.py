@@ -16,10 +16,10 @@ from model.cifar10 import resnet
 from utils import get_logger
 from model import QuantTune
 
-model_names = sorted(name for name in resnet.__dict__
+model_names = sorted(name for name in  resnet.__dict__
     if name.islower() and not name.startswith("__")
                      and name.startswith("resnet")
-                     and callable(resnet.__dict__[name]))
+                     and callable( resnet.__dict__[name]))
 
 
 parser = argparse.ArgumentParser(description='Propert ResNets for CIFAR10 in pytorch')
@@ -29,24 +29,24 @@ parser.add_argument('--arch', '-a', metavar='ARCH', default='resnet32',
                     ' (default: resnet32)')
 parser.add_argument('--data',
                     metavar='DIR',
-                    default='/apdcephfs/private_sijiezhao/Program/DMBQ/data',
+                    default='/apdcephfs/private_sijiezhao/Program/2021/NetworkQuantization/DMBQ/data',
                     help='path to dataset')
 parser.add_argument('--checkpoint-dir',
                     metavar='DIR',
-                    default='/apdcephfs/private_sijiezhao/Program/DMBQ/checkpoints',
+                    default='/apdcephfs/private_sijiezhao/Program/2021/NetworkQuantization/DMBQ/checkpoints',
                     help='dir of checkpoint')
 parser.add_argument('--expr-name',
                     default='cifar_float',
                     help='expriment name')
 parser.add_argument('-j', '--workers', default=8, type=int, metavar='N',
                     help='number of data loading workers (default: 4)')
-parser.add_argument('--epochs', default=250, type=int, metavar='N',
+parser.add_argument('--epochs', default=300, type=int, metavar='N',
                     help='number of total epochs to run')
 parser.add_argument('--start-epoch', default=0, type=int, metavar='N',
                     help='manual epoch number (useful on restarts)')
 parser.add_argument('-b', '--batch-size', default=512, type=int,
                     metavar='N', help='mini-batch size (default: 128)')
-parser.add_argument('--lr', '--learning-rate', default=0.1, type=float,
+parser.add_argument('--lr', '--learning-rate', default=5e-2, type=float,
                     metavar='LR', help='initial learning rate')
 parser.add_argument('--momentum', default=0.9, type=float, metavar='M',
                     help='momentum')
@@ -101,7 +101,7 @@ def main():
     if not os.path.exists(args.save_dir):
         os.makedirs(args.save_dir)
 
-    model = resnet.__dict__[args.arch]()
+    model =  resnet.__dict__[args.arch]()
     model.cuda()   
     # logger and checkpoint
     checkpoint_dir = os.path.join(args.checkpoint_dir,args.expr_name)
@@ -112,7 +112,9 @@ def main():
     # load pretrained
     if args.pretrained:
         checkpoint = torch.load(args.pretrained)
+        # model = torch.nn.DataParallel(model)
         model.load_state_dict(checkpoint['state_dict'])
+        # model = model.module
         logger.info('==> load pretrained model')
     # quantize code
     if args.quantize:
@@ -173,7 +175,7 @@ def main():
                 group.setdefault('initial_lr', group['lr'])
 
     lr_scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer,
-                                                        milestones=[100, 150,200], last_epoch=args.start_epoch - 1)
+                                                        milestones=[150,225], last_epoch=args.start_epoch - 1)
 
     if args.arch in ['resnet1202', 'resnet110']:
         # for resnet1202 original paper uses lr=0.01 for first 400 minibatches for warm-up
@@ -207,6 +209,8 @@ def main():
         # remember best prec@1 and save checkpoint
         is_best = prec1 > best_prec1
         best_prec1 = max(prec1, best_prec1)
+        logger.info(' * Prec@1 {:.3f} , Best Prec@1 {:.3f}'
+          .format(prec1,best_prec1))
 
         file_path = os.path.join(checkpoint_dir,'latest.pth.tar')
         if epoch > 0 and epoch % args.save_every == 0:
@@ -317,10 +321,6 @@ def validate(val_loader, model, criterion,logger):
                       'Prec@1 {top1.val:.3f} ({top1.avg:.3f})'.format(
                           i, len(val_loader), batch_time=batch_time, loss=losses,
                           top1=top1))
-
-    logger.info(' * Prec@1 {top1.avg:.3f}'
-          .format(top1=top1))
-
     return top1.avg
 
 def save_checkpoint(state, is_best, epoch=-1,file_path='./checkpoint.pth.tar'):

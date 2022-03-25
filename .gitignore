@@ -8,3 +8,5 @@ results/
 taiji_start/
 data/
 pretrained/
+**/*.out
+model/cifar10/resnet_previous.py

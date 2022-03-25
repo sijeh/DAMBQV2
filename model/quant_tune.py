@@ -53,8 +53,8 @@ class QuantTune():
     def __init__(self,model,wgt_target,act_target,tune_ratio_range=0.3,layerwise=False,duration=(0,10),logger=None,device=torch.device('cpu')):
         super().__init__()
         self.model = model
-        self.wgt_target = wgt_target
-        self.act_target = act_target
+        self.wgt_target = wgt_target + 0.07
+        self.act_target = act_target + 0.07
         self.tune_ratio_range = tune_ratio_range
         self.duration = duration
         self.device = device

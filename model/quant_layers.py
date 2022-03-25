@@ -126,12 +126,12 @@ class QuantConv2d(nn.Conv2d):
         x_num = float(self.x_res.nelement()/self.groups_act)
         with torch.no_grad():
             if self.layerwise:
-                self.w_err = self.w_res.mul(self.w_q.grad).abs().sum().div(w_num).view(1).detach()
-                self.x_err = self.x_res.mul(self.x_q.grad).abs().sum().div(x_num).view(1).detach()
+                self.w_err = self.w_res.mul(self.w_q.grad).sum().abs().div(w_num).view(1).detach()
+                self.x_err = self.x_res.mul(self.x_q.grad).sum().abs().div(x_num).view(1).detach()
             
             else:
-                self.w_err = self.w_res.mul(self.w_q.grad).abs().sum(dim=(1,2,3),keepdim=False).div(w_num).detach()
-                self.x_err = self.x_res.mul(self.x_q.grad).abs().sum(dim=(0,2,3),keepdim=False).div(x_num).detach()
+                self.w_err = self.w_res.mul(self.w_q.grad).sum(dim=(1,2,3),keepdim=False).abs().div(w_num).detach()
+                self.x_err = self.x_res.mul(self.x_q.grad).sum(dim=(0,2,3),keepdim=False).abs().div(x_num).detach()
 
         return self.w_err,self.x_err
     
@@ -192,11 +192,11 @@ class QuantLinear(nn.Linear):
         x_num = float(self.x_res.nelement()/self.groups_act)
         
         if self.layerwise:
-            self.w_err = self.w_res.mul(self.w_q.grad).sum().div(w_num).view(1).detach()
-            self.x_err = self.x_res.mul(self.x_q.grad).sum().div(x_num).view(1).detach()
+            self.w_err = self.w_res.mul(self.w_q.grad).sum().abs().div(w_num).view(1).detach()
+            self.x_err = self.x_res.mul(self.x_q.grad).sum().abs().div(x_num).view(1).detach()
         else:
-            self.w_err = self.w_res.mul(self.w_q.grad).view(self.groups_wgt,-1,self.in_features).sum(dim=(1,2),keepdim=False).div(w_num).detach()
-            self.x_err = self.x_res.mul(self.x_q.grad).view(self.x_q.shape[0],self.groups_act,-1).sum(dim=(0,2),keepdim=False).div(x_num).detach()
+            self.w_err = self.w_res.mul(self.w_q.grad).view(self.groups_wgt,-1,self.in_features).sum(dim=(1,2),keepdim=False).abs().div(w_num).detach()
+            self.x_err = self.x_res.mul(self.x_q.grad).view(self.x_q.shape[0],self.groups_act,-1).sum(dim=(0,2),keepdim=False).abs().div(x_num).detach()
 
         return self.w_err,self.x_err
     
