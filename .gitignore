@@ -10,3 +10,4 @@ data/
 pretrained/
 **/*.out
 model/cifar10/resnet_previous.py
+main_ddp.py
