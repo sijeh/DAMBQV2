@@ -3,7 +3,7 @@
 Reconstructed code of CVPR2021 paper ["Distribution-aware Adaptive Multi-bit Quantization"](https://openaccess.thecvf.com/content/CVPR2021/papers/Zhao_Distribution-Aware_Adaptive_Multi-Bit_Quantization_CVPR_2021_paper.pdf)
 
 ## Note 
-* In order to increase the extensibility and make it more elegant, we reconstructed the project in this repo. The original repo could be found [here](https://github.com/sijeh/DAMBQ) 
+* In order to increase the extensibility and make it more elegant, we reconstructed the algorithm in this repo. The original repo could be found [here](https://github.com/sijeh/DAMBQ) 
 
 * `model/quant_layers.py` is the module of DMBQ in the paper which will be used to replace the original `nn.Conv2d` or `nn.Linear`
 
